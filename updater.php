@@ -47,7 +47,7 @@ class wp_github_updater
 			,'sslverify'          => true
 			,'requires'           => $wp_version
 			,'tested'             => $wp_version
-		);	
+		);
 
 		$this->config = wp_parse_args( $config, $defaults );
 
@@ -175,6 +175,7 @@ class wp_github_updater
 	public function get_github_data() 
 	{
 		$github_data = get_site_transient( "{$this->config['slug']}_github_data" );
+
 // empty( $github_data )
 		if ( 
 			! isset( $github_data ) 
@@ -207,8 +208,9 @@ class wp_github_updater
 	 */
 	public function get_date() 
 	{
-		$date = $this->get_github_data();
-		$date = $date->updated_at;
+		$data = $this->get_github_data();
+echo '<pre>TEST: '; var_export( $data ); echo "</pre>";
+		$date = $data->updated_at;
 		return date( 'Y-m-d', strtotime( $date ) );
 	}
 
