@@ -131,7 +131,7 @@ class wp_github_updater
 	{
 		$version = get_site_transient( "{$this->config['slug']}_new_version" );
 
-		if ( empty( $version )  ) 
+		if ( ! $version ) 
 		{
 			$data = $this->get_github_data();
 			set_site_transient( 
@@ -159,7 +159,7 @@ class wp_github_updater
 	{
 		$github_data = get_site_transient( "{$this->config['slug']}_github_data" );
 
-		if ( empty( $github_data ) )
+		if ( ! $github_data )
 		{		
 			$github_data = wp_remote_get( 
 				 $this->config['api_url']
