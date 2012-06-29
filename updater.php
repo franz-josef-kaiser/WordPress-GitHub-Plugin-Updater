@@ -23,6 +23,14 @@ if ( ! class_exists( 'wp_github_updater' ) )
 class wp_github_updater 
 {
 	/**
+	 * Configuration
+	 * @access public
+	 * @var    array
+	 */
+	public $config;
+
+
+	/**
 	 * Construct
 	 * 
 	 * @since
@@ -33,25 +41,42 @@ class wp_github_updater
 	{
 		global $wp_version;
 
-		$host	= 'github.com';
-		$http	= 'https://';
-		$name	= 'franz-josef-kaiser';
-		$repo	= 'WordPress-GitHub-Plugin-Updater';
-		$defaults = array(
-			 'slug'               => plugin_basename( __FILE__ )
-			,'proper_folder_name' => plugin_basename( __FILE__ )
-			,'api_url'            => "{$http}api.{$host}/repos/{$name}/{$repo}"
-			,'raw_url'            => "{$http}raw.{$host}/{$name}/{$repo}/master"
-			,'github_url'         => "{$http}{$host}/{$name}/{$repo}"
-			,'zip_url'            => "{$http}{$host}/{$name}/{$repo}/zipball/master"
-			,'sslverify'          => true
-			,'requires'           => $wp_version
-			,'tested'             => $wp_version
+		$host = 'github.com';
+		$http = 'https://';
+		$name = 'franz-josef-kaiser';
+		$repo = 'WordPress-GitHub-Plugin-Updater';
+		// Default Data
+		$this->config = wp_parse_args( 
+			 $config
+			,array(
+				 'slug'               => plugin_basename( __FILE__ )
+				,'proper_folder_name' => plugin_basename( __FILE__ )
+				,'api_url'            => "{$http}api.{$host}/repos/{$name}/{$repo}"
+				,'raw_url'            => "{$http}raw.{$host}/{$name}/{$repo}/master"
+				,'github_url'         => "{$http}{$host}/{$name}/{$repo}"
+				,'zip_url'            => "{$http}{$host}/{$name}/{$repo}/zipball/master"
+				,'sslverify'          => true
+				,'requires'           => $wp_version
+				,'tested'             => $wp_version
+				,'readme_file'        => 'readme.md'
+			)
 		);
 
-		$this->config = wp_parse_args( $config, $defaults );
+		// Data from GitHub
+		$this->config = wp_parse_args( $this->config, array(
+			 'new_version'        => $this->get_new_version()
+			,'last_updated'       => $this->get_date()
+			,'description'        => $this->get_description()
+		) );
 
-		$this->set_defaults();
+		// Data from the plugin
+		$data = $this->get_plugin_data();
+		$this->config = wp_parse_args( $this->config, array(
+			 'plugin_name'        => $data['Name']
+			,'version'            => $data['Version']
+			,'author'             => $data['Author']
+			,'homepage'           => $data['PluginURI']
+		) );
 
 		defined( 'WP_DEBUG' ) AND WP_DEBUG AND add_action( 'init', array( $this, 'delete_transients' ) );
 
@@ -65,39 +90,6 @@ class wp_github_updater
 
 		// set timeout
 		add_filter( 'http_request_timeout', array( $this, 'http_request_timeout' ) );
-	}
-
-
-	/**
-	 * Set defaults
-	 * Fill in all optional values, if not set
-	 * 
-	 * @since
-	 * @return void
-	 */
-	public function set_defaults() 
-	{
-		if ( ! isset( $this->config['new_version'] ) )
-			$this->config['new_version']  = $this->get_new_version();
-
-		if ( ! isset( $this->config['last_updated'] ) )
-			$this->config['last_updated'] = $this->get_date();
-
-		if ( ! isset( $this->config['description'] ) )
-			$this->config['description']  = $this->get_description();
-
-		$plugin_data = $this->get_plugin_data();
-		if ( ! isset( $this->config['plugin_name'] ) )
-			$this->config['plugin_name']  = $plugin_data['Name'];
-
-		if ( ! isset( $this->config['version'] ) )
-			$this->config['version']      = $plugin_data['Version'];
-
-		if ( ! isset( $this->config['author'] ) )
-			$this->config['author']       = $plugin_data['Author'];
-
-		if ( ! isset( $this->config['homepage'] ) )
-			$this->config['homepage']     = $plugin_data['PluginURI'];
 	}
 
 
@@ -138,26 +130,17 @@ class wp_github_updater
 	public function get_new_version() 
 	{
 		$version = get_site_transient( "{$this->config['slug']}_new_version" );
-// empty( $version )
-		if ( 
-			! isset( $version ) 
-			OR ! $version 
-			OR '' == $version 
-			) 
+
+		if ( empty( $version )  ) 
 		{
-			$raw_response = wp_remote_get( 
-				 "{$this->config['raw_url']}/README.md"
-				,$this->config['sslverify'] 
+			$data = $this->get_github_data();
+			set_site_transient( 
+				 "{$this->config['slug']}_new_version"
+				 // Versionnr. is the last update date on the GitHub repo
+				,preg_replace( '/[^\D\s]/', '', $data->updated_at )
+				 // refresh every 6 hours
+				,60*60*6 
 			);
-
-			if ( is_wp_error( $raw_response ) )
-				return false;
-
-			$version = explode( '~Current Version:', $raw_response['body'] );
-			$version = explode( '~', $version[1] );
-			$version = $version[0];
-			// refresh every 6 hours
-			set_site_transient( "{$this->config['slug']}_new_version", $version, 60*60*6 );
 		}
 
 		return $version;
@@ -170,18 +153,13 @@ class wp_github_updater
 	 * @uses WordPress HTTP API `wp_remote_get()`
 	 * 
 	 * @since
-	 * @return 
+	 * @return object $github_data
 	 */
 	public function get_github_data() 
 	{
 		$github_data = get_site_transient( "{$this->config['slug']}_github_data" );
 
-// empty( $github_data )
-		if ( 
-			! isset( $github_data ) 
-			OR ! $github_data 
-			OR '' == $github_data 
-			) 
+		if ( empty( $github_data ) )
 		{		
 			$github_data = wp_remote_get( 
 				 $this->config['api_url']
@@ -192,8 +170,13 @@ class wp_github_updater
 				return false;
 
 			$github_data = json_decode( $github_data['body'] );
-			// refresh every 6 hours
-			set_site_transient( "{$this->config['slug']}_github_data", $github_data, 60*60*6);
+
+			$transient = set_site_transient( 
+				 "{$this->config['slug']}_github_data"
+				,$github_data
+				 // refresh every 6 hours
+				,60*60*6 
+			);
 		}
 
 		return $github_data;			
@@ -209,7 +192,6 @@ class wp_github_updater
 	public function get_date() 
 	{
 		$data = $this->get_github_data();
-echo '<pre>TEST: '; var_export( $data ); echo "</pre>";
 		$date = $data->updated_at;
 		return date( 'Y-m-d', strtotime( $date ) );
 	}
@@ -231,14 +213,13 @@ echo '<pre>TEST: '; var_export( $data ); echo "</pre>";
 	/**
 	 * Get Plugin Data
 	 * 
-	 * @since
-	 * @return object $data
+	 * @since  
+	 * @return object Plugin Data
 	 */
 	public function get_plugin_data() 
 	{
 		include_once( ABSPATH.'/wp-admin/includes/plugin.php' );
-		$data = get_plugin_data( WP_PLUGIN_DIR."/{$this->config['slug']}" );
-		return $data;
+		return get_plugin_data( trailingslashit( WP_PLUGIN_DIR )."{$this->config['slug']}" );
 	}
 
 
@@ -247,7 +228,7 @@ echo '<pre>TEST: '; var_export( $data ); echo "</pre>";
 	 * Hook into the plugin update check
 	 * 
 	 * @since
-	 * @param object $transient
+	 * @param  object $transient
 	 * @return object $transient
 	 */
 	public function api_check( $transient ) 
@@ -258,7 +239,10 @@ echo '<pre>TEST: '; var_export( $data ); echo "</pre>";
 			return $transient;
 		
 		// check the version and make sure it's new
-		$update = version_compare( $this->config['new_version'], $this->config['version'] );
+		$update = version_compare( 
+			 $this->config['new_version']
+			,$this->config['version'] 
+		);
 		if ( 1 === $update ) 
 		{
 			$response = new stdClass;
@@ -279,12 +263,12 @@ echo '<pre>TEST: '; var_export( $data ); echo "</pre>";
 	 * Get Plugin info
 	 * 
 	 * @since
-	 * @param unknown_type $false
-	 * @param unknown_type $action
-	 * @param unknown_type $args
-	 * @return unknown_type $response
+	 * @param  bool         $bool
+	 * @param  string       $action
+	 * @param  array|object $args
+	 * @return object       $response
 	 */
-	public function get_plugin_info( $false, $action, $args ) 
+	public function get_plugin_info( $bool, $action, $args ) 
 	{
 		$plugin_slug = plugin_basename( __FILE__ );
 
@@ -316,9 +300,9 @@ echo '<pre>TEST: '; var_export( $data ); echo "</pre>";
 	 * Move & activate the plugin, echo the update message
 	 * 
 	 * @since
-	 * @param boolean $true
-	 * @param unknown_type $hook_extra
-	 * @param unknown_type $result
+	 * @param  boolean $true
+	 * @param  unknown_type $hook_extra
+	 * @param  unknown_type $result
 	 * @return unknown_type $result
 	 */
 	public function upgrader_post_install( $true, $hook_extra, $result ) 
