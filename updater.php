@@ -12,7 +12,7 @@ if ( ! class_exists( 'wp_github_updater' ) )
  * 
  * @author     Franz Josef Kaiser - forked from Joachim Kudish
  * @license    GNU GPL 2
- * @copyright  © Franz Josef Kaiser, Joachim Kudish 2011-2012
+ * @copyright  © Franz Josef Kaiser 2011-2012
  * 
  * @version    2012-06-29.1158
  * @link       https://github.com/franz-josef-kaiser/WordPress-GitHub-Plugin-Updater
@@ -39,6 +39,49 @@ class wp_github_updater
 	 */
 	public function __construct( $config = array() ) 
 	{
+/*
+		if ( 
+			! in_array( 
+				 $GLOBALS['pagenow']
+				,array( 'plugins.php', 'plugin-install.php' ) 
+			)
+		)
+			return;
+*/
+		$this->set_args( $config );
+
+		// Development
+		if ( defined( 'WP_DEBUG' ) AND WP_DEBUG )
+		{
+			// Kill update interval
+			$this->config['update_interval'] = 0;
+			// Delete transients
+			#add_action( 'init', array( $this, 'delete_transients' ) );
+		}
+
+		! defined( 'WP_MEMORY_LIMIT' ) AND define( 'WP_MEMORY_LIMIT', '96M' );
+
+		add_filter( 'pre_set_site_transient_update_plugins', array( $this, 'api_check' ) );
+
+		// Hook into the plugin details screen
+		add_filter( 'plugins_api', array( $this, 'get_plugin_info' ), 10, 3 );
+		add_filter( 'upgrader_post_install', array( $this, 'upgrader_post_install' ), 10, 3 );
+
+		// set timeout
+		add_filter( 'http_request_timeout', array( $this, 'http_request_timeout' ) );
+	}
+
+
+	/**
+	 * Merge args with defaults.
+	 * Pay attention, as any part of the config can be overwritten with the input data
+	 * 
+	 * @since  1.0
+	 * @param  array $config
+	 * @return void
+	 */
+	public function set_args( $config )
+	{
 		global $wp_version;
 
 		$host = 'github.com';
@@ -59,6 +102,8 @@ class wp_github_updater
 				,'requires'           => $wp_version
 				,'tested'             => $wp_version
 				,'readme_file'        => 'readme.md'
+				 // The default update check interval is set to 12 hours
+				,'update_interval'    => 60*60*12
 			)
 		);
 
@@ -66,8 +111,15 @@ class wp_github_updater
 		$this->config = wp_parse_args( $this->config, array(
 			 'new_version'        => $this->get_new_version()
 			,'last_updated'       => $this->get_date()
-			,'description'        => $this->get_description()
 		) );
+		// Merge custom description w GitHub description
+		// Allows to add custom tabs		
+		$this->config['description'] = wp_parse_args(
+			 $this->config['description']
+			,array( 
+				'description' => $this->get_description() 
+			 )
+		);
 
 		// Data from the plugin
 		$data = $this->get_plugin_data();
@@ -77,19 +129,6 @@ class wp_github_updater
 			,'author'             => $data['Author']
 			,'homepage'           => $data['PluginURI']
 		) );
-
-		defined( 'WP_DEBUG' ) AND WP_DEBUG AND add_action( 'init', array( $this, 'delete_transients' ) );
-
-		! defined( 'WP_MEMORY_LIMIT' ) AND define( 'WP_MEMORY_LIMIT', '96M' );
-
-		add_filter( 'pre_set_site_transient_update_plugins', array( $this, 'api_check' ) );
-
-		// Hook into the plugin details screen
-		add_filter( 'plugins_api', array( $this, 'get_plugin_info' ), 10, 3 );
-		add_filter( 'upgrader_post_install', array( $this, 'upgrader_post_install' ), 10, 3 );
-
-		// set timeout
-		add_filter( 'http_request_timeout', array( $this, 'http_request_timeout' ) );
 	}
 
 
@@ -110,14 +149,123 @@ class wp_github_updater
 	 * For testing purpose, the site transient will be reset on each page load
 	 * 
 	 * @since
-	 * @return void
+	 * @return mixed $value
 	 */
 	public function delete_transients() 
 	{
 		delete_site_transient( 'update_plugins' );
 		delete_site_transient( "{$this->config['slug']}_new_version" );
-		delete_site_transient( "{$this->config['slug']}_github_data" );
+		delete_site_transient( "{$this->config['slug']}_remote_data" );
 		delete_site_transient( "{$this->config['slug']}_changelog" );
+	}
+
+
+	/**
+	 * Get version number from main remote file plugin header comment
+	 * 
+	 * @return mixed string|bool $all_headers FALSE on failure, ARRAY w plugin header comment data on success
+	 */
+	public function get_remote_plugin_header()
+	{
+		// As seen in core inside `get_plugin_data()`
+		$default_headers = array(
+			 'Name'        => 'Plugin Name'
+			,'PluginURI'   => 'Plugin URI'
+			,'Version'     => 'Version'
+			,'Description' => 'Description'
+			,'Author'      => 'Author'
+			,'AuthorURI'   => 'Author URI'
+			,'TextDomain'  => 'Text Domain'
+			,'DomainPath'  => 'Domain Path'
+			,'Network'     => 'Network'
+			 // "_sitewide"/"Site Wide Only" is deprecated in favor of Network.
+			,'_sitewide'   => 'Site Wide Only'
+		);
+
+		// Call the main remote file
+		$main_file   = array_pop( explode( '/', $this->config['slug'] ) );
+		$remote_data = wp_remote_get(
+			 "{$this->config['raw_url']}/{$main_file}" 
+			,$this->config['sslverify'] 
+		);
+ 
+		if ( 
+			is_wp_error( $remote_data )
+			OR 200 !== wp_remote_retrieve_response_code( $remote_data )
+		)
+			return false;
+
+		// Get the first 8kB (plugin header comment)
+		// Pretty equal to what `get_file_data()` does in core
+		$remote_data = substr( 
+			 wp_remote_retrieve_body( $remote_data )
+			,0
+			,8192
+		);
+		// Get rid of unnecessary stuff
+		$remote_data = str_replace( "\r", "\n", $remote_data );
+
+		$all_headers = false;
+		// Copied from core `get_file_data()`
+		foreach ( $default_headers as $field => $regex )
+		{
+			$all_headers[ $field ] = '';
+			if ( 
+				preg_match( 
+					 '/^[ \t\/*#@]*'.preg_quote( $regex, '/' ).':(.*)$/mi'
+					,$remote_data
+					,$match 
+				)
+				AND $match[1] 
+			)
+				$all_headers[ $field ] = trim( preg_replace( "/\s*(?:\*\/|\?>).*/", '', $match[1] ) );
+		}
+
+		return $all_headers;
+	}
+
+
+	/**
+	 * Get GitHub Data
+	 * 
+	 * @uses WordPress HTTP API `wp_remote_get()`
+	 * 
+	 * @since
+	 * @return object $remote_data
+	 */
+	public function get_remote_data() 
+	{
+		$remote_data = get_site_transient( "{$this->config['slug']}_remote_data" );
+
+		if ( $remote_data )
+			return $remote_data;
+
+		$remote_data = wp_remote_get( 
+			 $this->config['api_url']
+			,$this->config['sslverify'] 
+		);
+ 
+		if ( 
+			is_wp_error( $remote_data )
+			OR 200 !== wp_remote_retrieve_response_code( $remote_data )
+		)
+			return false;
+
+		$remote_body = wp_remote_retrieve_body( $remote_data );
+		// Abort with WP Error on fail
+		if ( is_wp_error( $remote_body ) )
+			return $remote_body;
+
+		$remote_body = json_decode( $remote_body );
+
+		$transient = set_site_transient( 
+			 "{$this->config['slug']}_remote_data"
+			,$remote_body
+			 // refresh every 6 hours
+			,$this->config['update_interval']
+		);
+
+		return $remote_body;
 	}
 
 
@@ -132,55 +280,19 @@ class wp_github_updater
 		$version = get_site_transient( "{$this->config['slug']}_new_version" );
 
 		if ( $version )
-			return $version; 
+			return $version;
 
-		$data    = $this->get_github_data();
-		$version = preg_replace( '/[^\D\s]/', '', $data->updated_at );
+		$data    = $this->get_remote_plugin_header();
+		$version = (int) $data['Version'];
 		set_site_transient( 
 			 "{$this->config['slug']}_new_version"
 			 // Versionnr. is the last update date on the GitHub repo
 			,$version
 			 // refresh every 6 hours
-			,60*60*6 
+			,$this->config['update_interval']
 		);
 
 		return $version;
-	}
-
-
-	/**
-	 * Get GitHub Data
-	 * 
-	 * @uses WordPress HTTP API `wp_remote_get()`
-	 * 
-	 * @since
-	 * @return object $github_data
-	 */
-	public function get_github_data() 
-	{
-		$github_data = get_site_transient( "{$this->config['slug']}_github_data" );
-
-		if ( $github_data )
-			return $github_data;
-
-		$github_data = wp_remote_get( 
-			 $this->config['api_url']
-			,$this->config['sslverify'] 
-		);
-
-		if ( is_wp_error( $github_data ) )
-			return false;
-
-		$github_data = json_decode( $github_data['body'] );
-
-		$transient = set_site_transient( 
-			 "{$this->config['slug']}_github_data"
-			,$github_data
-			 // refresh every 6 hours
-			,60*60*6 
-		);
-
-		return $github_data;			
 	}
 
 
@@ -192,7 +304,7 @@ class wp_github_updater
 	 */
 	public function get_date() 
 	{
-		$data = $this->get_github_data();
+		$data = $this->get_remote_data();
 		$date = $data->updated_at;
 		return date( 'Y-m-d', strtotime( $date ) );
 	}
@@ -206,8 +318,7 @@ class wp_github_updater
 	 */
 	public function get_description() 
 	{
-		$description = $this->get_github_data();
-		return $description->description;
+		return $this->get_remote_data()->description;
 	}
 
 
@@ -229,8 +340,8 @@ class wp_github_updater
 	 * Hook into the plugin update check
 	 * 
 	 * @since
-	 * @param  object $transient
-	 * @return object $transient
+	 * @param  mixed $transient Transient value. Expected to not be SQL-escaped.
+	 * @return mixed $transient
 	 */
 	public function api_check( $transient ) 
 	{
@@ -238,13 +349,15 @@ class wp_github_updater
 		// If not, just return its value without hacking it
 		if ( empty( $transient->checked ) )
 			return $transient;
-		
+
 		// check the version and make sure it's new
 		$update = version_compare( 
 			 $this->config['new_version']
 			,$this->config['version'] 
 		);
-		if ( 1 === $update ) 
+
+		// 13% Faster than using the operator in version_compare()
+		if ( $update >= 0 ) 
 		{
 			$response = new stdClass;
 			$response->new_version = $this->config['new_version'];
@@ -287,9 +400,14 @@ class wp_github_updater
 		$response->tested        = $this->config['tested'];
 		$response->downloaded    = 0;
 		$response->last_updated  = $this->config['last_updated'];
-		$response->sections      = array(
-			'description' => $this->config['description']
-		);
+
+		// Sections/Tabs
+		! is_array( $this->config['description'] ) AND array( 'description' => $this->config['description'] );
+		foreach ( $this->config['description'] as $tab => $content )
+		{
+			$response->sections[ $tab ] = $content;
+		}
+
 		$response->download_link = $this->config['zip_url'];
 
 		return $response;
@@ -310,14 +428,15 @@ class wp_github_updater
 	{
 		global $wp_filesystem;
 
-		// Move & Activate
-		$plugin_dir = WP_PLUGIN_DIR;
-		$proper_destination = "{$plugin_dir}/{$this->config['proper_folder_name']}";
+		$plugin_dir  = WP_PLUGIN_DIR;
+		$destination = "{$plugin_dir}/{$this->config['proper_folder_name']}";
+		// Move
 		$wp_filesystem->move( 
 			 $result['destination']
-			,$proper_destination 
+			,$destination 
 		);
-		$result['destination'] = $proper_destination;
+		$result['destination'] = $destination;
+		// Activate
 		$activate = activate_plugin( "{$plugin_dir}/{$this->config['slug']}" );
 
 		// Output the update message
