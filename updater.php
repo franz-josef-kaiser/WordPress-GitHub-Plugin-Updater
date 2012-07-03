@@ -39,7 +39,6 @@ class wp_github_updater
 	 */
 	public function __construct( $config = array() ) 
 	{
-/*
 		if ( 
 			! in_array( 
 				 $GLOBALS['pagenow']
@@ -47,7 +46,7 @@ class wp_github_updater
 			)
 		)
 			return;
-*/
+
 		$this->set_args( $config );
 
 		// Development
@@ -55,8 +54,6 @@ class wp_github_updater
 		{
 			// Kill update interval
 			$this->config['update_interval'] = 0;
-			// Delete transients
-			#add_action( 'init', array( $this, 'delete_transients' ) );
 		}
 
 		! defined( 'WP_MEMORY_LIMIT' ) AND define( 'WP_MEMORY_LIMIT', '96M' );
@@ -141,22 +138,6 @@ class wp_github_updater
 	public function http_request_timeout() 
 	{
 		return 2;
-	}
-
-
-	/**
-	 * Delete transients
-	 * For testing purpose, the site transient will be reset on each page load
-	 * 
-	 * @since
-	 * @return mixed $value
-	 */
-	public function delete_transients() 
-	{
-		delete_site_transient( 'update_plugins' );
-		delete_site_transient( "{$this->config['slug']}_new_version" );
-		delete_site_transient( "{$this->config['slug']}_remote_data" );
-		delete_site_transient( "{$this->config['slug']}_changelog" );
 	}
 
 
